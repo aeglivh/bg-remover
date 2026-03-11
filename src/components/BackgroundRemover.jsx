@@ -55,7 +55,7 @@ export default function BackgroundRemover() {
       setLoadingMsg("Removing background...");
 
       const blob = await removeLib.current(original.file, {
-        model: "isnet_fp16",
+        model: "isnet",
         output: { format: "image/png" },
         proxyToWorker: false,
         progress: (key, current, total) => {
