@@ -72,11 +72,13 @@ export default function BackgroundRemover() {
     }
   };
 
-  const download = () => {
+  const download = async () => {
     if (!result) return;
+    const resp = await fetch(result.url);
+    const blob = await resp.blob();
     const a = document.createElement("a");
     const baseName = original.name.replace(/\.[^.]+$/, "");
-    a.href = result.url;
+    a.href = URL.createObjectURL(blob);
     a.download = `${baseName}-no-bg.png`;
     a.click();
   };
