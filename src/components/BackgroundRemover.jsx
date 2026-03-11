@@ -63,8 +63,8 @@ export default function BackgroundRemover() {
       setResult({ url: resultUrl, blob });
       setPreview("result");
     } catch (err) {
-      setError("Something went wrong. Try a different image or refresh the page.");
-      console.error(err);
+      setError(`Error: ${err?.message || err}`);
+      console.error("BG removal error:", err);
     } finally {
       setLoading(false);
       setLoadingMsg("");
