@@ -1,13 +1,4 @@
-import { useState, useRef, useCallback } from "react";
-
-function fileToDataUri(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
+import { useState, useRef, useCallback, useEffect } from "react";
 
 export default function BackgroundRemover() {
   const [original, setOriginal] = useState(null);
@@ -17,7 +8,20 @@ export default function BackgroundRemover() {
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState("result");
+  const [editing, setEditing] = useState(false);
+  const [brushSize, setBrushSize] = useState(30);
+  const [brushMode, setBrushMode] = useState("erase"); // "erase" or "restore"
   const fileRef = useRef();
+  const removeLib = useRef(null);
+  const canvasRef = useRef();
+  const isDrawing = useRef(false);
+  const lastPos = useRef(null);
+
+  useEffect(() => {
+    import("@imgly/background-removal")
+      .then((mod) => { removeLib.current = mod.removeBackground; })
+      .catch((e) => console.warn("Preload failed, will retry:", e));
+  }, []);
 
   const processFile = useCallback((file) => {
     if (!file || !file.type.startsWith("image/")) {
@@ -26,6 +30,7 @@ export default function BackgroundRemover() {
     }
     setError("");
     setResult(null);
+    setEditing(false);
     const url = URL.createObjectURL(file);
     setOriginal({ file, url, name: file.name });
   }, []);
@@ -40,28 +45,26 @@ export default function BackgroundRemover() {
 
   const removeBackground = async () => {
     if (!original) return setError("Please upload an image first.");
-
     setLoading(true);
     setError("");
-    setLoadingMsg("Uploading image...");
+    setLoadingMsg("Loading AI model...");
 
     try {
-      const dataUri = await fileToDataUri(original.file);
-      setLoadingMsg("Removing background...");
-
-      const response = await fetch("/api/remove-bg", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUri }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Failed to remove background");
+      if (!removeLib.current) {
+        const mod = await import("@imgly/background-removal");
+        removeLib.current = mod.removeBackground;
       }
-
-      const data = await response.json();
-      setResult({ url: data.output });
+      setLoadingMsg("Removing background...");
+      const blob = await removeLib.current(original.file, {
+        model: "isnet",
+        output: { format: "image/png" },
+        proxyToWorker: false,
+        progress: (key, current, total) => {
+          setLoadingMsg(`${key} ${Math.round((current / total) * 100)}%`);
+        },
+      });
+      const resultUrl = URL.createObjectURL(blob);
+      setResult({ url: resultUrl, blob });
       setPreview("result");
     } catch (err) {
       setError(`Error: ${err?.message || err}`);
@@ -72,15 +75,142 @@ export default function BackgroundRemover() {
     }
   };
 
-  const download = async () => {
+  // Initialize canvas for editing
+  const startEditing = () => {
+    setEditing(true);
+    setPreview("result");
+    const canvas = canvasRef.current;
+    if (!canvas || !result) return;
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = result.url;
+  };
+
+  useEffect(() => {
+    if (editing && result && canvasRef.current) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+      };
+      img.src = result.url;
+    }
+  }, [editing, result]);
+
+  const getCanvasPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
+    };
+  };
+
+  const drawBrush = (from, to) => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    const scale = canvas.width / rect.width;
+    const size = brushSize * scale;
+
+    ctx.lineWidth = size;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    if (brushMode === "erase") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0,0,0,1)";
+    } else {
+      // Restore mode: draw original image through a clipping path
+      ctx.globalCompositeOperation = "source-over";
+    }
+
+    if (brushMode === "erase") {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    } else {
+      // For restore: stamp original image pixels back
+      const origImg = new Image();
+      origImg.src = result.url;
+      // We need to draw from the original result, so use a temp approach
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, size / 2, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(origImg, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+  };
+
+  const onPointerDown = (e) => {
+    e.preventDefault();
+    isDrawing.current = true;
+    const pos = getCanvasPos(e);
+    lastPos.current = pos;
+    // Draw a dot at the start position
+    drawBrush(pos, pos);
+  };
+
+  const onPointerMove = (e) => {
+    e.preventDefault();
+    if (!isDrawing.current) return;
+    const pos = getCanvasPos(e);
+    drawBrush(lastPos.current, pos);
+    lastPos.current = pos;
+  };
+
+  const onPointerUp = (e) => {
+    e.preventDefault();
+    isDrawing.current = false;
+    lastPos.current = null;
+  };
+
+  const saveEdits = () => {
+    const canvas = canvasRef.current;
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      setResult({ url, blob });
+      setEditing(false);
+    }, "image/png");
+  };
+
+  const cancelEdits = () => {
+    setEditing(false);
+  };
+
+  const download = () => {
     if (!result) return;
-    const resp = await fetch(result.url);
-    const blob = await resp.blob();
-    const a = document.createElement("a");
-    const baseName = original.name.replace(/\.[^.]+$/, "");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${baseName}-no-bg.png`;
-    a.click();
+    if (editing && canvasRef.current) {
+      canvasRef.current.toBlob((blob) => {
+        const a = document.createElement("a");
+        const baseName = original.name.replace(/\.[^.]+$/, "");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${baseName}-no-bg.png`;
+        a.click();
+      }, "image/png");
+    } else {
+      const a = document.createElement("a");
+      const baseName = original.name.replace(/\.[^.]+$/, "");
+      a.href = result.url;
+      a.download = `${baseName}-no-bg.png`;
+      a.click();
+    }
   };
 
   const reset = () => {
@@ -88,23 +218,24 @@ export default function BackgroundRemover() {
     setResult(null);
     setError("");
     setPreview("result");
+    setEditing(false);
   };
+
+  const checkerBg = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' y='10' width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' width='10' height='10' fill='%23e5e7eb'/%3E%3Crect y='10' width='10' height='10' fill='%23e5e7eb'/%3E%3C/svg%3E\")";
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans">
-      {/* Header */}
       <header className="bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-gray-900 tracking-tight">BG Remover</h1>
-          <p className="text-xs text-gray-400 mt-0.5">High-quality AI background removal</p>
+          <p className="text-xs text-gray-400 mt-0.5">Free AI background removal · runs in your browser</p>
         </div>
         <span className="text-xs bg-emerald-50 text-emerald-600 border border-emerald-100 px-3 py-1 rounded-full font-medium">
-          Free
+          Private & free
         </span>
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-12">
-        {/* Upload Zone */}
         {!original && (
           <div
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -118,16 +249,15 @@ export default function BackgroundRemover() {
             <div className="text-4xl mb-4">🖼️</div>
             <p className="text-gray-700 font-medium">Drag & drop an image here</p>
             <p className="text-gray-400 text-sm mt-1">or click to browse</p>
-            <p className="text-gray-300 text-xs mt-4">JPG, PNG, WebP</p>
+            <p className="text-gray-300 text-xs mt-4">JPG, PNG, WebP · processed locally in your browser</p>
             <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} className="hidden" />
           </div>
         )}
 
-        {/* Preview Area */}
         {original && (
           <div className="space-y-6">
-            {/* Toggle */}
-            {result && (
+            {/* View toggle */}
+            {result && !editing && (
               <div className="flex items-center justify-center gap-1 bg-white border border-gray-100 rounded-xl p-1 w-fit mx-auto shadow-sm">
                 {["original", "result"].map((v) => (
                   <button
@@ -143,14 +273,61 @@ export default function BackgroundRemover() {
               </div>
             )}
 
-            {/* Image Display */}
+            {/* Brush toolbar */}
+            {editing && (
+              <div className="flex items-center justify-center gap-4 bg-white border border-gray-100 rounded-xl px-4 py-2.5 w-fit mx-auto shadow-sm">
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setBrushMode("erase")}
+                    className={`px-3 py-1 rounded-lg text-sm font-medium transition-all ${
+                      brushMode === "erase" ? "bg-red-500 text-white" : "text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    Eraser
+                  </button>
+                  <button
+                    onClick={() => setBrushMode("restore")}
+                    className={`px-3 py-1 rounded-lg text-sm font-medium transition-all ${
+                      brushMode === "restore" ? "bg-green-500 text-white" : "text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    Restore
+                  </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400">Size</span>
+                  <input
+                    type="range"
+                    min="5"
+                    max="100"
+                    value={brushSize}
+                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                    className="w-24 accent-indigo-500"
+                  />
+                  <span className="text-xs text-gray-500 w-6">{brushSize}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={cancelEdits}
+                    className="px-3 py-1 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveEdits}
+                    className="px-3 py-1 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Image / Canvas display */}
             <div
               className="bg-white border border-gray-100 rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-80 p-6"
               style={{
-                backgroundImage:
-                  preview === "result" && result
-                    ? "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' y='10' width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' width='10' height='10' fill='%23e5e7eb'/%3E%3Crect y='10' width='10' height='10' fill='%23e5e7eb'/%3E%3C/svg%3E\")"
-                    : "none",
+                backgroundImage: (preview === "result" && result) || editing ? checkerBg : "none",
               }}
             >
               {loading ? (
@@ -158,6 +335,19 @@ export default function BackgroundRemover() {
                   <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
                   <p className="text-sm text-gray-400">{loadingMsg}</p>
                 </div>
+              ) : editing ? (
+                <canvas
+                  ref={canvasRef}
+                  onMouseDown={onPointerDown}
+                  onMouseMove={onPointerMove}
+                  onMouseUp={onPointerUp}
+                  onMouseLeave={onPointerUp}
+                  onTouchStart={onPointerDown}
+                  onTouchMove={onPointerMove}
+                  onTouchEnd={onPointerUp}
+                  className="max-h-[500px] max-w-full object-contain rounded-lg"
+                  style={{ cursor: "crosshair", touchAction: "none" }}
+                />
               ) : (
                 <img
                   src={preview === "result" && result ? result.url : original.url}
@@ -167,7 +357,6 @@ export default function BackgroundRemover() {
               )}
             </div>
 
-            {/* Error */}
             {error && (
               <div className="bg-red-50 border border-red-100 text-red-600 text-sm px-4 py-3 rounded-xl">
                 {error}
@@ -175,30 +364,40 @@ export default function BackgroundRemover() {
             )}
 
             {/* Actions */}
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={reset}
-                className="px-5 py-2.5 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 border border-gray-200 bg-white hover:bg-gray-50 transition-all"
-              >
-                Upload new image
-              </button>
-              {result ? (
+            {!editing && (
+              <div className="flex gap-3 justify-end">
                 <button
-                  onClick={download}
-                  className="px-6 py-2.5 rounded-xl text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600 transition-all shadow-sm"
+                  onClick={reset}
+                  className="px-5 py-2.5 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 border border-gray-200 bg-white hover:bg-gray-50 transition-all"
                 >
-                  Download PNG
+                  Upload new image
                 </button>
-              ) : (
-                <button
-                  onClick={removeBackground}
-                  disabled={loading}
-                  className="px-6 py-2.5 rounded-xl text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
-                >
-                  Remove Background
-                </button>
-              )}
-            </div>
+                {result && (
+                  <button
+                    onClick={startEditing}
+                    className="px-5 py-2.5 rounded-xl text-sm font-medium text-gray-700 border border-gray-200 bg-white hover:bg-gray-50 transition-all"
+                  >
+                    Clean up
+                  </button>
+                )}
+                {result ? (
+                  <button
+                    onClick={download}
+                    className="px-6 py-2.5 rounded-xl text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600 transition-all shadow-sm"
+                  >
+                    Download PNG
+                  </button>
+                ) : (
+                  <button
+                    onClick={removeBackground}
+                    disabled={loading}
+                    className="px-6 py-2.5 rounded-xl text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
+                  >
+                    Remove Background
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -206,9 +405,8 @@ export default function BackgroundRemover() {
           <p className="text-red-500 text-sm text-center mt-4">{error}</p>
         )}
 
-        {/* Footer */}
         <p className="text-center text-gray-300 text-xs mt-12">
-          Powered by AI background removal.
+          Images never leave your device. Powered by IMG.LY background-removal.
         </p>
       </main>
     </div>
