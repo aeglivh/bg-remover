@@ -26,6 +26,7 @@ export default function BackgroundRemover() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [undoCount, setUndoCount] = useState(0); // just to trigger re-renders
   const fileRef = useRef();
   const removeLib = useRef(null);
   const canvasRef = useRef();
@@ -33,6 +34,8 @@ export default function BackgroundRemover() {
   const isDrawing = useRef(false);
   const lastPos = useRef(null);
   const panStart = useRef(null);
+  const undoStack = useRef([]);
+  const redoStack = useRef([]);
 
   useEffect(() => {
     import("@imgly/background-removal")
@@ -92,12 +95,48 @@ export default function BackgroundRemover() {
     }
   };
 
+  const saveSnapshot = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+    undoStack.current.push(data);
+    redoStack.current = [];
+    setUndoCount(undoStack.current.length);
+  };
+
+  const undo = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || undoStack.current.length === 0) return;
+    const ctx = canvas.getContext("2d");
+    // Save current state to redo
+    redoStack.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    // Restore previous state
+    const prev = undoStack.current.pop();
+    ctx.putImageData(prev, 0, 0);
+    setUndoCount(undoStack.current.length);
+  }, []);
+
+  const redo = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || redoStack.current.length === 0) return;
+    const ctx = canvas.getContext("2d");
+    // Save current state to undo
+    undoStack.current.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    // Restore redo state
+    const next = redoStack.current.pop();
+    ctx.putImageData(next, 0, 0);
+    setUndoCount(undoStack.current.length);
+  }, []);
+
   const startEditing = () => {
     setEditing(true);
     setPreview("result");
     setTempBg("checker");
     setZoom(1);
     setPan({ x: 0, y: 0 });
+    undoStack.current = [];
+    redoStack.current = [];
+    setUndoCount(0);
   };
 
   useEffect(() => {
@@ -169,6 +208,8 @@ export default function BackgroundRemover() {
       };
       return;
     }
+    // Save snapshot before drawing starts
+    saveSnapshot();
     isDrawing.current = true;
     const pos = getCanvasPos(e);
     lastPos.current = pos;
@@ -220,10 +261,14 @@ export default function BackgroundRemover() {
     return () => wrapper.removeEventListener("wheel", onWheel);
   }, [editing, onWheel]);
 
-  // Space key for pan mode
+  // Keyboard shortcuts: Space for pan, Cmd+Z undo, Cmd+Shift+Z redo
   useEffect(() => {
     if (!editing) return;
-    const onKeyDown = (e) => { if (e.code === "Space") { e.preventDefault(); setIsPanning(true); } };
+    const onKeyDown = (e) => {
+      if (e.code === "Space") { e.preventDefault(); setIsPanning(true); }
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && e.shiftKey) { e.preventDefault(); redo(); }
+    };
     const onKeyUp = (e) => { if (e.code === "Space") { setIsPanning(false); panStart.current = null; } };
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
@@ -410,6 +455,28 @@ export default function BackgroundRemover() {
 
                 <div className="w-px h-5 bg-gray-200" />
 
+                {/* Undo/Redo */}
+                <div className="flex items-center gap-0.5">
+                  <button
+                    onClick={undo}
+                    disabled={undoStack.current.length === 0}
+                    className="w-7 h-7 rounded-lg text-sm text-gray-500 hover:text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent flex items-center justify-center"
+                    title="Undo (Cmd+Z)"
+                  >
+                    ↩
+                  </button>
+                  <button
+                    onClick={redo}
+                    disabled={redoStack.current.length === 0}
+                    className="w-7 h-7 rounded-lg text-sm text-gray-500 hover:text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:hover:bg-transparent flex items-center justify-center"
+                    title="Redo (Cmd+Shift+Z)"
+                  >
+                    ↪
+                  </button>
+                </div>
+
+                <div className="w-px h-5 bg-gray-200" />
+
                 {/* Actions */}
                 <div className="flex items-center gap-1">
                   <button onClick={cancelEdits} className="px-3 py-1 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700">Cancel</button>
@@ -421,7 +488,7 @@ export default function BackgroundRemover() {
             {/* Hint for zoom/pan */}
             {editing && (
               <p className="text-center text-xs text-gray-400">
-                Scroll to zoom · Hold Space + drag to pan
+                Scroll to zoom · Space + drag to pan · Cmd+Z undo
               </p>
             )}
 
