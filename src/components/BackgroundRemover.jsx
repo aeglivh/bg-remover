@@ -56,7 +56,7 @@ export default function BackgroundRemover() {
 
       const blob = await removeLib.current(original.file, {
         model: "isnet_fp16",
-        output: { format: "image/png", type: "foreground" },
+        output: { format: "image/png" },
       });
 
       const resultUrl = URL.createObjectURL(blob);
