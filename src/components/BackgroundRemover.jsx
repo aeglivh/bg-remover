@@ -1,5 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
+const BG_OPTIONS = [
+  { id: "checker", label: "🏁", color: null },
+  { id: "white", label: "", color: "#ffffff" },
+  { id: "black", label: "", color: "#000000" },
+  { id: "pink", label: "", color: "#ff69b4" },
+  { id: "green", label: "", color: "#00cc66" },
+];
+
+const CHECKER_BG = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' y='10' width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' width='10' height='10' fill='%23e5e7eb'/%3E%3Crect y='10' width='10' height='10' fill='%23e5e7eb'/%3E%3C/svg%3E\")";
+
 export default function BackgroundRemover() {
   const [original, setOriginal] = useState(null);
   const [result, setResult] = useState(null);
@@ -10,10 +20,13 @@ export default function BackgroundRemover() {
   const [preview, setPreview] = useState("result");
   const [editing, setEditing] = useState(false);
   const [brushSize, setBrushSize] = useState(30);
-  const [brushMode, setBrushMode] = useState("erase"); // "erase" or "restore"
+  const [brushMode, setBrushMode] = useState("erase");
+  const [tempBg, setTempBg] = useState("checker");
+  const [cursorPos, setCursorPos] = useState(null);
   const fileRef = useRef();
   const removeLib = useRef(null);
   const canvasRef = useRef();
+  const wrapperRef = useRef();
   const isDrawing = useRef(false);
   const lastPos = useRef(null);
 
@@ -79,17 +92,7 @@ export default function BackgroundRemover() {
   const startEditing = () => {
     setEditing(true);
     setPreview("result");
-    const canvas = canvasRef.current;
-    if (!canvas || !result) return;
-    const ctx = canvas.getContext("2d");
-    const img = new Image();
-    img.onload = () => {
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-    };
-    img.src = result.url;
+    setTempBg("checker");
   };
 
   useEffect(() => {
@@ -134,21 +137,14 @@ export default function BackgroundRemover() {
     if (brushMode === "erase") {
       ctx.globalCompositeOperation = "destination-out";
       ctx.strokeStyle = "rgba(0,0,0,1)";
-    } else {
-      // Restore mode: draw original image through a clipping path
-      ctx.globalCompositeOperation = "source-over";
-    }
-
-    if (brushMode === "erase") {
       ctx.beginPath();
       ctx.moveTo(from.x, from.y);
       ctx.lineTo(to.x, to.y);
       ctx.stroke();
     } else {
-      // For restore: stamp original image pixels back
       const origImg = new Image();
       origImg.src = result.url;
-      // We need to draw from the original result, so use a temp approach
+      ctx.globalCompositeOperation = "source-over";
       ctx.save();
       ctx.beginPath();
       ctx.arc(to.x, to.y, size / 2, 0, Math.PI * 2);
@@ -163,12 +159,18 @@ export default function BackgroundRemover() {
     isDrawing.current = true;
     const pos = getCanvasPos(e);
     lastPos.current = pos;
-    // Draw a dot at the start position
     drawBrush(pos, pos);
   };
 
   const onPointerMove = (e) => {
     e.preventDefault();
+    // Update cursor position for custom circle cursor
+    if (wrapperRef.current) {
+      const rect = wrapperRef.current.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      setCursorPos({ x: clientX - rect.left, y: clientY - rect.top });
+    }
     if (!isDrawing.current) return;
     const pos = getCanvasPos(e);
     drawBrush(lastPos.current, pos);
@@ -221,7 +223,12 @@ export default function BackgroundRemover() {
     setEditing(false);
   };
 
-  const checkerBg = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' y='10' width='10' height='10' fill='%23f3f4f6'/%3E%3Crect x='10' width='10' height='10' fill='%23e5e7eb'/%3E%3Crect y='10' width='10' height='10' fill='%23e5e7eb'/%3E%3C/svg%3E\")";
+  const getBgStyle = () => {
+    if (!((preview === "result" && result) || editing)) return {};
+    const opt = BG_OPTIONS.find((o) => o.id === tempBg);
+    if (opt?.color) return { backgroundColor: opt.color };
+    return { backgroundImage: CHECKER_BG };
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans">
@@ -255,8 +262,8 @@ export default function BackgroundRemover() {
         )}
 
         {original && (
-          <div className="space-y-6">
-            {/* View toggle */}
+          <div className="space-y-4">
+            {/* View toggle (non-editing) */}
             {result && !editing && (
               <div className="flex items-center justify-center gap-1 bg-white border border-gray-100 rounded-xl p-1 w-fit mx-auto shadow-sm">
                 {["original", "result"].map((v) => (
@@ -275,7 +282,8 @@ export default function BackgroundRemover() {
 
             {/* Brush toolbar */}
             {editing && (
-              <div className="flex items-center justify-center gap-4 bg-white border border-gray-100 rounded-xl px-4 py-2.5 w-fit mx-auto shadow-sm">
+              <div className="flex flex-wrap items-center justify-center gap-3 bg-white border border-gray-100 rounded-xl px-4 py-2.5 w-fit mx-auto shadow-sm">
+                {/* Brush mode */}
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => setBrushMode("erase")}
@@ -294,18 +302,55 @@ export default function BackgroundRemover() {
                     Restore
                   </button>
                 </div>
+
+                {/* Divider */}
+                <div className="w-px h-5 bg-gray-200" />
+
+                {/* Brush size */}
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400">Size</span>
                   <input
                     type="range"
                     min="5"
                     max="100"
                     value={brushSize}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
-                    className="w-24 accent-indigo-500"
+                    className="w-20 accent-indigo-500"
                   />
                   <span className="text-xs text-gray-500 w-6">{brushSize}</span>
                 </div>
+
+                {/* Divider */}
+                <div className="w-px h-5 bg-gray-200" />
+
+                {/* Temp background swatches */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-gray-400">BG</span>
+                  {BG_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      onClick={() => setTempBg(opt.id)}
+                      className={`w-6 h-6 rounded-full border-2 transition-all flex items-center justify-center text-[10px] ${
+                        tempBg === opt.id ? "border-indigo-500 scale-110" : "border-gray-200"
+                      }`}
+                      style={
+                        opt.color
+                          ? { backgroundColor: opt.color }
+                          : {
+                              backgroundImage: CHECKER_BG,
+                              backgroundSize: "10px 10px",
+                            }
+                      }
+                      title={opt.id}
+                    >
+                      {opt.id === "checker" ? "" : ""}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Divider */}
+                <div className="w-px h-5 bg-gray-200" />
+
+                {/* Actions */}
                 <div className="flex items-center gap-1">
                   <button
                     onClick={cancelEdits}
@@ -323,12 +368,35 @@ export default function BackgroundRemover() {
               </div>
             )}
 
+            {/* Background color swatches for non-editing result view */}
+            {result && !editing && preview === "result" && (
+              <div className="flex items-center justify-center gap-1.5">
+                {BG_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.id}
+                    onClick={() => setTempBg(opt.id)}
+                    className={`w-5 h-5 rounded-full border-2 transition-all ${
+                      tempBg === opt.id ? "border-indigo-500 scale-110" : "border-gray-200"
+                    }`}
+                    style={
+                      opt.color
+                        ? { backgroundColor: opt.color }
+                        : {
+                            backgroundImage: CHECKER_BG,
+                            backgroundSize: "10px 10px",
+                          }
+                    }
+                    title={opt.id}
+                  />
+                ))}
+              </div>
+            )}
+
             {/* Image / Canvas display */}
             <div
-              className="bg-white border border-gray-100 rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-80 p-6"
-              style={{
-                backgroundImage: (preview === "result" && result) || editing ? checkerBg : "none",
-              }}
+              className="border border-gray-100 rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-80 p-6 relative"
+              style={getBgStyle()}
+              ref={wrapperRef}
             >
               {loading ? (
                 <div className="flex flex-col items-center gap-3 py-12">
@@ -336,18 +404,38 @@ export default function BackgroundRemover() {
                   <p className="text-sm text-gray-400">{loadingMsg}</p>
                 </div>
               ) : editing ? (
-                <canvas
-                  ref={canvasRef}
-                  onMouseDown={onPointerDown}
-                  onMouseMove={onPointerMove}
-                  onMouseUp={onPointerUp}
-                  onMouseLeave={onPointerUp}
-                  onTouchStart={onPointerDown}
-                  onTouchMove={onPointerMove}
-                  onTouchEnd={onPointerUp}
-                  className="max-h-[500px] max-w-full object-contain rounded-lg"
-                  style={{ cursor: "crosshair", touchAction: "none" }}
-                />
+                <>
+                  <canvas
+                    ref={canvasRef}
+                    onMouseDown={onPointerDown}
+                    onMouseMove={onPointerMove}
+                    onMouseUp={onPointerUp}
+                    onMouseLeave={(e) => { onPointerUp(e); setCursorPos(null); }}
+                    onMouseEnter={(e) => {
+                      const rect = wrapperRef.current.getBoundingClientRect();
+                      setCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                    }}
+                    onTouchStart={onPointerDown}
+                    onTouchMove={onPointerMove}
+                    onTouchEnd={onPointerUp}
+                    className="max-h-[500px] max-w-full object-contain rounded-lg"
+                    style={{ cursor: "none", touchAction: "none" }}
+                  />
+                  {/* Custom circle cursor */}
+                  {cursorPos && (
+                    <div
+                      className="pointer-events-none absolute rounded-full"
+                      style={{
+                        width: brushSize,
+                        height: brushSize,
+                        left: cursorPos.x - brushSize / 2,
+                        top: cursorPos.y - brushSize / 2,
+                        border: `2px solid ${brushMode === "erase" ? "rgba(239,68,68,0.7)" : "rgba(34,197,94,0.7)"}`,
+                        backgroundColor: brushMode === "erase" ? "rgba(239,68,68,0.1)" : "rgba(34,197,94,0.1)",
+                      }}
+                    />
+                  )}
+                </>
               ) : (
                 <img
                   src={preview === "result" && result ? result.url : original.url}
