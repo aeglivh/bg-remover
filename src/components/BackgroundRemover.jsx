@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 const BG_OPTIONS = [
-  { id: "checker", label: "🏁", color: null },
+  { id: "checker", label: "", color: null },
   { id: "white", label: "", color: "#ffffff" },
   { id: "black", label: "", color: "#000000" },
   { id: "pink", label: "", color: "#ff69b4" },
@@ -23,12 +23,16 @@ export default function BackgroundRemover() {
   const [brushMode, setBrushMode] = useState("erase");
   const [tempBg, setTempBg] = useState("checker");
   const [cursorPos, setCursorPos] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const fileRef = useRef();
   const removeLib = useRef(null);
   const canvasRef = useRef();
   const wrapperRef = useRef();
   const isDrawing = useRef(false);
   const lastPos = useRef(null);
+  const panStart = useRef(null);
 
   useEffect(() => {
     import("@imgly/background-removal")
@@ -88,11 +92,12 @@ export default function BackgroundRemover() {
     }
   };
 
-  // Initialize canvas for editing
   const startEditing = () => {
     setEditing(true);
     setPreview("result");
     setTempBg("checker");
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
   };
 
   useEffect(() => {
@@ -156,6 +161,14 @@ export default function BackgroundRemover() {
 
   const onPointerDown = (e) => {
     e.preventDefault();
+    // Middle mouse or space+click for panning
+    if (e.button === 1 || isPanning) {
+      panStart.current = {
+        x: (e.touches ? e.touches[0].clientX : e.clientX) - pan.x,
+        y: (e.touches ? e.touches[0].clientY : e.clientY) - pan.y,
+      };
+      return;
+    }
     isDrawing.current = true;
     const pos = getCanvasPos(e);
     lastPos.current = pos;
@@ -164,13 +177,21 @@ export default function BackgroundRemover() {
 
   const onPointerMove = (e) => {
     e.preventDefault();
-    // Update cursor position for custom circle cursor
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    // Update cursor
     if (wrapperRef.current) {
       const rect = wrapperRef.current.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
       setCursorPos({ x: clientX - rect.left, y: clientY - rect.top });
     }
+
+    // Panning
+    if (panStart.current) {
+      setPan({ x: clientX - panStart.current.x, y: clientY - panStart.current.y });
+      return;
+    }
+
     if (!isDrawing.current) return;
     const pos = getCanvasPos(e);
     drawBrush(lastPos.current, pos);
@@ -181,7 +202,37 @@ export default function BackgroundRemover() {
     e.preventDefault();
     isDrawing.current = false;
     lastPos.current = null;
+    panStart.current = null;
   };
+
+  // Zoom with scroll wheel
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.15 : 0.15;
+    setZoom((z) => Math.min(Math.max(z + delta, 0.5), 5));
+  }, []);
+
+  // Attach wheel listener with passive: false
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper || !editing) return;
+    wrapper.addEventListener("wheel", onWheel, { passive: false });
+    return () => wrapper.removeEventListener("wheel", onWheel);
+  }, [editing, onWheel]);
+
+  // Space key for pan mode
+  useEffect(() => {
+    if (!editing) return;
+    const onKeyDown = (e) => { if (e.code === "Space") { e.preventDefault(); setIsPanning(true); } };
+    const onKeyUp = (e) => { if (e.code === "Space") { setIsPanning(false); panStart.current = null; } };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
+  }, [editing]);
+
+  const zoomIn = () => setZoom((z) => Math.min(z + 0.25, 5));
+  const zoomOut = () => setZoom((z) => Math.max(z - 0.25, 0.5));
+  const zoomReset = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
 
   const saveEdits = () => {
     const canvas = canvasRef.current;
@@ -189,11 +240,15 @@ export default function BackgroundRemover() {
       const url = URL.createObjectURL(blob);
       setResult({ url, blob });
       setEditing(false);
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
     }, "image/png");
   };
 
   const cancelEdits = () => {
     setEditing(false);
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
   };
 
   const download = () => {
@@ -221,6 +276,8 @@ export default function BackgroundRemover() {
     setError("");
     setPreview("result");
     setEditing(false);
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
   };
 
   const getBgStyle = () => {
@@ -303,7 +360,6 @@ export default function BackgroundRemover() {
                   </button>
                 </div>
 
-                {/* Divider */}
                 <div className="w-px h-5 bg-gray-200" />
 
                 {/* Brush size */}
@@ -319,7 +375,17 @@ export default function BackgroundRemover() {
                   <span className="text-xs text-gray-500 w-6">{brushSize}</span>
                 </div>
 
-                {/* Divider */}
+                <div className="w-px h-5 bg-gray-200" />
+
+                {/* Zoom controls */}
+                <div className="flex items-center gap-1">
+                  <button onClick={zoomOut} className="w-7 h-7 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 flex items-center justify-center">-</button>
+                  <button onClick={zoomReset} className="px-1.5 py-0.5 rounded text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 font-mono min-w-[40px] text-center">
+                    {Math.round(zoom * 100)}%
+                  </button>
+                  <button onClick={zoomIn} className="w-7 h-7 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 flex items-center justify-center">+</button>
+                </div>
+
                 <div className="w-px h-5 bg-gray-200" />
 
                 {/* Temp background swatches */}
@@ -335,37 +401,28 @@ export default function BackgroundRemover() {
                       style={
                         opt.color
                           ? { backgroundColor: opt.color }
-                          : {
-                              backgroundImage: CHECKER_BG,
-                              backgroundSize: "10px 10px",
-                            }
+                          : { backgroundImage: CHECKER_BG, backgroundSize: "10px 10px" }
                       }
                       title={opt.id}
-                    >
-                      {opt.id === "checker" ? "" : ""}
-                    </button>
+                    />
                   ))}
                 </div>
 
-                {/* Divider */}
                 <div className="w-px h-5 bg-gray-200" />
 
                 {/* Actions */}
                 <div className="flex items-center gap-1">
-                  <button
-                    onClick={cancelEdits}
-                    className="px-3 py-1 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveEdits}
-                    className="px-3 py-1 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600"
-                  >
-                    Done
-                  </button>
+                  <button onClick={cancelEdits} className="px-3 py-1 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700">Cancel</button>
+                  <button onClick={saveEdits} className="px-3 py-1 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-600">Done</button>
                 </div>
               </div>
+            )}
+
+            {/* Hint for zoom/pan */}
+            {editing && (
+              <p className="text-center text-xs text-gray-400">
+                Scroll to zoom · Hold Space + drag to pan
+              </p>
             )}
 
             {/* Background color swatches for non-editing result view */}
@@ -381,10 +438,7 @@ export default function BackgroundRemover() {
                     style={
                       opt.color
                         ? { backgroundColor: opt.color }
-                        : {
-                            backgroundImage: CHECKER_BG,
-                            backgroundSize: "10px 10px",
-                          }
+                        : { backgroundImage: CHECKER_BG, backgroundSize: "10px 10px" }
                     }
                     title={opt.id}
                   />
@@ -394,7 +448,7 @@ export default function BackgroundRemover() {
 
             {/* Image / Canvas display */}
             <div
-              className="border border-gray-100 rounded-2xl overflow-hidden shadow-sm flex items-center justify-center min-h-80 p-6 relative"
+              className="border border-gray-100 rounded-2xl shadow-sm flex items-center justify-center min-h-80 p-6 relative overflow-hidden"
               style={getBgStyle()}
               ref={wrapperRef}
             >
@@ -418,11 +472,17 @@ export default function BackgroundRemover() {
                     onTouchStart={onPointerDown}
                     onTouchMove={onPointerMove}
                     onTouchEnd={onPointerUp}
-                    className="max-h-[500px] max-w-full object-contain rounded-lg"
-                    style={{ cursor: "none", touchAction: "none" }}
+                    className="max-w-full object-contain rounded-lg"
+                    style={{
+                      cursor: isPanning ? "grab" : "none",
+                      touchAction: "none",
+                      transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,
+                      transformOrigin: "center center",
+                      maxHeight: editing ? "none" : "500px",
+                    }}
                   />
                   {/* Custom circle cursor */}
-                  {cursorPos && (
+                  {cursorPos && !isPanning && (
                     <div
                       className="pointer-events-none absolute rounded-full"
                       style={{
