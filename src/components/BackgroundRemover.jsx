@@ -11,13 +11,13 @@ export default function BackgroundRemover() {
   const fileRef = useRef();
   const removeLib = useRef(null);
 
-  // Preload the library + model in the background on mount
+  // Preload the library in the background on mount
   useEffect(() => {
-    import("@imgly/background-removal").then((mod) => {
-      removeLib.current = mod.removeBackground;
-    }).catch(() => {
-      // will retry on first use
-    });
+    import("@imgly/background-removal")
+      .then((mod) => {
+        removeLib.current = mod.removeBackground;
+      })
+      .catch((e) => console.warn("Preload failed, will retry:", e));
   }, []);
 
   const processFile = useCallback((file) => {
@@ -57,6 +57,10 @@ export default function BackgroundRemover() {
       const blob = await removeLib.current(original.file, {
         model: "isnet_fp16",
         output: { format: "image/png" },
+        proxyToWorker: false,
+        progress: (key, current, total) => {
+          setLoadingMsg(`${key} ${Math.round((current / total) * 100)}%`);
+        },
       });
 
       const resultUrl = URL.createObjectURL(blob);
