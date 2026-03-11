@@ -1,4 +1,13 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
+
+function fileToDataUri(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function BackgroundRemover() {
   const [original, setOriginal] = useState(null);
@@ -9,16 +18,6 @@ export default function BackgroundRemover() {
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState("result");
   const fileRef = useRef();
-  const removeLib = useRef(null);
-
-  // Preload the library in the background on mount
-  useEffect(() => {
-    import("@imgly/background-removal")
-      .then((mod) => {
-        removeLib.current = mod.removeBackground;
-      })
-      .catch((e) => console.warn("Preload failed, will retry:", e));
-  }, []);
 
   const processFile = useCallback((file) => {
     if (!file || !file.type.startsWith("image/")) {
@@ -44,27 +43,25 @@ export default function BackgroundRemover() {
 
     setLoading(true);
     setError("");
-    setLoadingMsg("Loading AI model (first run may take ~10s)...");
+    setLoadingMsg("Uploading image...");
 
     try {
-      if (!removeLib.current) {
-        const mod = await import("@imgly/background-removal");
-        removeLib.current = mod.removeBackground;
-      }
-
+      const dataUri = await fileToDataUri(original.file);
       setLoadingMsg("Removing background...");
 
-      const blob = await removeLib.current(original.file, {
-        model: "isnet",
-        output: { format: "image/png" },
-        proxyToWorker: false,
-        progress: (key, current, total) => {
-          setLoadingMsg(`${key} ${Math.round((current / total) * 100)}%`);
-        },
+      const response = await fetch("/api/remove-bg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: dataUri }),
       });
 
-      const resultUrl = URL.createObjectURL(blob);
-      setResult({ url: resultUrl, blob });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || "Failed to remove background");
+      }
+
+      const data = await response.json();
+      setResult({ url: data.output });
       setPreview("result");
     } catch (err) {
       setError(`Error: ${err?.message || err}`);
@@ -75,11 +72,13 @@ export default function BackgroundRemover() {
     }
   };
 
-  const download = () => {
+  const download = async () => {
     if (!result) return;
+    const response = await fetch(result.url);
+    const blob = await response.blob();
     const a = document.createElement("a");
     const baseName = original.name.replace(/\.[^.]+$/, "");
-    a.href = result.url;
+    a.href = URL.createObjectURL(blob);
     a.download = `${baseName}-no-bg.png`;
     a.click();
   };
@@ -97,10 +96,10 @@ export default function BackgroundRemover() {
       <header className="bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-gray-900 tracking-tight">BG Remover</h1>
-          <p className="text-xs text-gray-400 mt-0.5">100% free · runs in your browser · no uploads</p>
+          <p className="text-xs text-gray-400 mt-0.5">High-quality AI background removal</p>
         </div>
         <span className="text-xs bg-emerald-50 text-emerald-600 border border-emerald-100 px-3 py-1 rounded-full font-medium">
-          Private & free
+          Free
         </span>
       </header>
 
@@ -119,7 +118,7 @@ export default function BackgroundRemover() {
             <div className="text-4xl mb-4">🖼️</div>
             <p className="text-gray-700 font-medium">Drag & drop an image here</p>
             <p className="text-gray-400 text-sm mt-1">or click to browse</p>
-            <p className="text-gray-300 text-xs mt-4">JPG, PNG, WebP · processed locally in your browser</p>
+            <p className="text-gray-300 text-xs mt-4">JPG, PNG, WebP</p>
             <input ref={fileRef} type="file" accept="image/*" onChange={onFileChange} className="hidden" />
           </div>
         )}
@@ -209,7 +208,7 @@ export default function BackgroundRemover() {
 
         {/* Footer */}
         <p className="text-center text-gray-300 text-xs mt-12">
-          Images never leave your device. Powered by IMG.LY background-removal.
+          Powered by AI background removal.
         </p>
       </main>
     </div>
