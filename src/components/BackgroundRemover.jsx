@@ -14,7 +14,7 @@ export default function BackgroundRemover() {
   // Preload the library + model in the background on mount
   useEffect(() => {
     import("@imgly/background-removal").then((mod) => {
-      removeLib.current = mod.default;
+      removeLib.current = mod.removeBackground;
     }).catch(() => {
       // will retry on first use
     });
@@ -49,7 +49,7 @@ export default function BackgroundRemover() {
     try {
       if (!removeLib.current) {
         const mod = await import("@imgly/background-removal");
-        removeLib.current = mod.default;
+        removeLib.current = mod.removeBackground;
       }
 
       setLoadingMsg("Removing background...");
